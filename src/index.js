@@ -455,28 +455,50 @@ function getNeighbors(p) {
   // Done is a terminal state.
   if (p.done) return [];
   const {node, dir, bonus, burnsRemaining, wait} = p
+  const parentFuelRemaining = p.fuelRemaining ?? Infinity
+  const parentEngineBurns = p.engineBurnsThisTurn ?? 0
+  const parentPivotUsed = p.pivotUsed ?? false
+
+  // Ending the turn: compute fuel cost for this turn's engine burns
+  const endTurnFuelUsed = fuelForBurns(parentEngineBurns)
+  const endTurnFuelRemaining = parentFuelRemaining - endTurnFuelUsed
+  const fuelOkForEndTurn = !(fuelCapacity > 0 && endTurnFuelRemaining < 0)
+
   /** @type {PathNode[]} */
-  const ns = [{node, dir: null, bonus: 0, done: true, burnsRemaining}] // Ending the turn is always valid. TODO: not on a lander burn!
+  const ns = []
+  if (fuelOkForEndTurn) {
+    ns.push({node, dir: null, bonus: 0, done: true, burnsRemaining, fuelRemaining: endTurnFuelRemaining, engineBurnsThisTurn: 0})
+  }
+
   const { edgeLabels, points } = mapData
   const venusFlybyAvailable = solarSeason === 'blue'
   if (edgeLabels[node] && dir != null && !wait) {
     for (const otherNode of Object.keys(edgeLabels[node])) {
       if (edgeLabels[node][otherNode] !== dir) {
-        // Burn through a Hohmann.
-        const directionChangeCost = (edgeLabels[node][otherNode] === '0' ? 0 : 2) + (points[otherNode].type === 'burn' ? (points[otherNode].landing ?? 1) : 0)
+        // Pivot (direction change through a Hohmann)
+        const rawPivotCost = edgeLabels[node][otherNode] === '0' ? 0 : 2
+        const pivotCost = (freePivot && !parentPivotUsed && rawPivotCost > 0) ? 0 : rawPivotCost
+        const usedPivot = (freePivot && !parentPivotUsed && rawPivotCost > 0) || parentPivotUsed
+        const directionChangeCost = pivotCost + (points[otherNode].type === 'burn' ? (points[otherNode].landing ?? 1) : 0)
         const bonusAfterHohmann = Math.max(bonus - directionChangeCost, 0)
         const bonusBurnsUsed = bonus - bonusAfterHohmann
         const burnsRemainingAfterHohmann = burnsRemaining - directionChangeCost + bonusBurnsUsed
         const otherNodeType = points[otherNode].type
         const newDir = otherNodeType === 'hohmann' || otherNodeType === 'decorative' ? edgeLabels[node][otherNode] : null
-        if (directionChangeCost <= burnsRemaining)
-          ns.push({node: otherNode, dir: newDir, bonus: bonusAfterHohmann, burnsRemaining: burnsRemainingAfterHohmann})
+        const engineBurnsForPivot = directionChangeCost - bonusBurnsUsed
+        if (directionChangeCost <= burnsRemaining) {
+          // Direction change: emits neighbor with new dir, allowing pivot-through
+          // (Dijkstra will naturally continue movement in the new direction)
+          ns.push({node: otherNode, dir: newDir, bonus: bonusAfterHohmann, burnsRemaining: burnsRemainingAfterHohmann, fuelRemaining: parentFuelRemaining, engineBurnsThisTurn: parentEngineBurns + engineBurnsForPivot, pivotUsed: usedPivot})
+        }
       }
     }
   }
   if (!wait && (points[node].type === 'hohmann' || ((points[node].type === 'burn' || points[node].type === 'lagrange') && burnsRemaining === 0))) {
-    // Wait a turn.
-    ns.push({node, dir: null, bonus: 0, wait: true, burnsRemaining: thrust})
+    // Wait a turn: compute fuel for this turn, then reset for next turn.
+    if (fuelOkForEndTurn) {
+      ns.push({node, dir: null, bonus: 0, wait: true, burnsRemaining: thrust, fuelRemaining: endTurnFuelRemaining, engineBurnsThisTurn: 0, pivotUsed: false})
+    }
   }
   for (const other of mapData.neighborsOf(node)) {
     if (edgeLabels[other] && edgeLabels[other][node] === '0')
@@ -488,8 +510,9 @@ function getNeighbors(p) {
       const flybyBoost = flybyBoostRaw === 'thrust' ? thrust : flybyBoostRaw
       const bonusUsed = points[other].landing ? 0 : Math.min(bonus, entryCost)
       const bonusAfterEntry = Math.max(bonus - bonusUsed + flybyBoost, 0)
-      if (burnsRemaining >= entryCost - bonusUsed)
-        ns.push({node: other, dir, bonus: bonusAfterEntry, burnsRemaining: burnsRemaining - (entryCost - bonusUsed)})
+      const engineBurnsForEntry = entryCost - bonusUsed
+      if (burnsRemaining >= engineBurnsForEntry)
+        ns.push({node: other, dir, bonus: bonusAfterEntry, burnsRemaining: burnsRemaining - engineBurnsForEntry, fuelRemaining: parentFuelRemaining, engineBurnsThisTurn: parentEngineBurns + engineBurnsForEntry, pivotUsed: parentPivotUsed})
     }
   }
   return ns
@@ -580,13 +603,23 @@ function segmentWeight(u, v) {
 }
 
 /** @param {PathNode} u @param {PathNode} v */
+function fuelStepsWeight(u, v) {
+  // fuelSteps are counted at turn boundaries (done or wait)
+  if (v.done || v.wait) {
+    return fuelForBurns(u.engineBurnsThisTurn ?? 0)
+  }
+  return 0
+}
+
+/** @param {PathNode} u @param {PathNode} v */
 function edgeWeights(u, v) {
   const burns = burnWeight(u, v)
   const turns = turnWeight(u, v)
   const hazards = hazardWeight(u, v)
   const radHazards = radHazardWeight(u, v)
+  const fuelSteps = fuelStepsWeight(u, v)
   const segments = segmentWeight(u, v)
-  return {burns, turns, hazards, radHazards, segments}
+  return {burns, turns, hazards, radHazards, fuelSteps, segments}
 }
 
 /** @param {PathNode} u @param {PathNode} v @returns {number[]} */
@@ -595,7 +628,7 @@ function nodeWeight(u, v) {
   return [...metricPriority.map(key => weights[key]), weights.segments]
 }
 
-/** @typedef {{weight: number[], burnsRemaining: number, bonus: number}} DominanceEntry */
+/** @typedef {{weight: number[], burnsRemaining: number, bonus: number, fuelRemaining: number, engineBurnsThisTurn: number}} DominanceEntry */
 /** @returns {(node: PathNode, weight: number[]) => boolean} */
 function makeDominancePrune() {
   /** @param {PathNode} node */
@@ -603,27 +636,38 @@ function makeDominancePrune() {
     const dir = node.dir ?? ''
     const wait = node.wait ? 'w' : ''
     const done = node.done ? 'd' : ''
-    return `${node.node}|${dir}|${wait}|${done}`
+    const pivot = node.pivotUsed ? 'p' : ''
+    return `${node.node}|${dir}|${wait}|${done}|${pivot}`
   }
   /** @type {Map<string, DominanceEntry[]>} */
   const frontier = new Map
   return (node, weight) => {
-    const key = dominanceKey(node)
+    // Constraint pruning: check if any metric exceeds its constraint
+    for (let i = 0; i < metricPriority.length; i++) {
+      const key = metricPriority[i]
+      if (constraints[key] !== null && (weight[i] ?? 0) > constraints[key]) {
+        return true
+      }
+    }
+
+    const dKey = dominanceKey(node)
     const br = node.burnsRemaining ?? 0
     const bonus = node.bonus ?? 0
-    const entries = frontier.get(key)
+    const fr = node.fuelRemaining ?? Infinity
+    const ebt = node.engineBurnsThisTurn ?? 0
+    const entries = frontier.get(dKey)
 
     if (entries) {
       for (const e of entries) {
-        if (tupleNs.lessThanEq(e.weight, weight) && e.burnsRemaining >= br && e.bonus >= bonus) {
+        if (tupleNs.lessThanEq(e.weight, weight) && e.burnsRemaining >= br && e.bonus >= bonus && e.fuelRemaining >= fr && e.engineBurnsThisTurn <= ebt) {
           return true
         }
       }
-      const kept = entries.filter(e => !(tupleNs.lessThanEq(weight, e.weight) && br >= e.burnsRemaining && bonus >= e.bonus))
-      kept.push({weight, burnsRemaining: br, bonus})
-      frontier.set(key, kept)
+      const kept = entries.filter(e => !(tupleNs.lessThanEq(weight, e.weight) && br >= e.burnsRemaining && bonus >= e.bonus && fr >= e.fuelRemaining && ebt <= e.engineBurnsThisTurn))
+      kept.push({weight, burnsRemaining: br, bonus, fuelRemaining: fr, engineBurnsThisTurn: ebt})
+      frontier.set(dKey, kept)
     } else {
-      frontier.set(key, [{weight, burnsRemaining: br, bonus}])
+      frontier.set(dKey, [{weight, burnsRemaining: br, bonus, fuelRemaining: fr, engineBurnsThisTurn: ebt}])
     }
     return false
   }
@@ -638,7 +682,7 @@ function pathId(p) {
   // Fast, collision-resistant encoding for path state.
   const id = p.done
     ? p.node
-    : `s:${p.node}|${p.dir ?? ''}|${p.bonus}|${p.burnsRemaining}|${p.wait ? 1 : 0}`
+    : `s:${p.node}|${p.dir ?? ''}|${p.bonus}|${p.burnsRemaining}|${p.wait ? 1 : 0}|${p.fuelRemaining ?? ''}|${p.engineBurnsThisTurn ?? 0}|${p.pivotUsed ? 1 : 0}`
   // Cache on the object; symbol property stays non-enumerable in JSON/stringify.
   Object.defineProperty(p, PATH_ID, {value: id})
   return id
@@ -662,7 +706,7 @@ function findPath(fromId) {
   console.time('calculating paths')
 
   const dominancePrune = makeDominancePrune()
-  const source = /** @type {PathNode} */ ({node: fromId, dir: null, bonus: 0, burnsRemaining: thrust})
+  const source = /** @type {PathNode} */ ({node: fromId, dir: null, bonus: 0, burnsRemaining: thrust, fuelRemaining: fuelCapacity > 0 ? fuelCapacity : Infinity, engineBurnsThisTurn: 0, pivotUsed: false})
   const pathData = dijkstra(getNeighbors, nodeWeight, tupleNs, pathId, source, allowed, dominancePrune)
 
   console.timeEnd('calculating paths')
@@ -677,7 +721,7 @@ function findPath(fromId) {
  * @returns {PathNode[]|undefined}
  */
 function drawPath({ distance, previous }, fromId, toId) {
-  const source = /** @type {PathNode} */ ({node: fromId, dir: null, bonus: 0, burnsRemaining: thrust})
+  const source = /** @type {PathNode} */ ({node: fromId, dir: null, bonus: 0, burnsRemaining: thrust, fuelRemaining: fuelCapacity > 0 ? fuelCapacity : Infinity, engineBurnsThisTurn: 0, pivotUsed: false})
 
   let shorterTo = /** @type {PathNode} */ ({node: toId, dir: null, bonus: 0, done: true})
   let shorterToId = pathId(shorterTo)
@@ -697,8 +741,8 @@ function drawPath({ distance, previous }, fromId, toId) {
 
 /** @param {PathNode[]|null|undefined} path */
 function pathWeight(path) {
-  /** @type {{burns: number, turns: number, hazards: number, radHazards: number}} */
-  const total = {burns: 0, turns: 0, hazards: 0, radHazards: 0}
+  /** @type {{burns: number, turns: number, hazards: number, radHazards: number, fuelSteps: number}} */
+  const total = {burns: 0, turns: 0, hazards: 0, radHazards: 0, fuelSteps: 0}
   if (!path) return total
 
   for (let i = 1; i < path.length; i++) {
@@ -707,6 +751,7 @@ function pathWeight(path) {
     total.turns += edge.turns
     total.hazards += edge.hazards
     total.radHazards += edge.radHazards
+    total.fuelSteps += edge.fuelSteps
   }
   return total
 }
@@ -745,9 +790,9 @@ const synodicStrokeColors = {
   blue: '#01abef',
 }
 
-/** @typedef {'burns'|'turns'|'hazards'|'radHazards'} MetricKey */
+/** @typedef {'burns'|'turns'|'hazards'|'radHazards'|'fuelSteps'} MetricKey */
 /** @type {MetricKey[]} */
-let metricPriority = ['burns', 'turns', 'hazards', 'radHazards']
+let metricPriority = ['burns', 'turns', 'hazards', 'radHazards', 'fuelSteps']
 /** @param {MetricKey} metric */
 function prioritizeMetric(metric) {
   if (!metricPriority.includes(metric)) return
@@ -758,6 +803,17 @@ function prioritizeMetric(metric) {
 
 let isru = 0
 let thrust = 12
+let fuelRateNum = 0
+let fuelRateDen = 1
+let fuelCapacity = 0
+let freePivot = false
+/** @type {Record<MetricKey, number|null>} */
+let constraints = {burns: null, turns: null, hazards: null, radHazards: null, fuelSteps: null}
+
+/** @returns {number} */
+function fuelRate() { return fuelRateNum / fuelRateDen }
+/** @param {number} n @returns {number} */
+function fuelForBurns(n) { return Math.ceil(n * fuelRate()) }
 /** @type {Set<string>} */
 let enabledSiteTypes = new Set(siteTypeOptions)
 /** @param {number} e */
@@ -772,6 +828,7 @@ function setThrust(value) {
   const clamped = Math.max(1, Math.min(15, rounded))
   thrust = clamped
   recomputeHighlightedPath()
+  draw()
 }
 
 /** @param {string} type */
@@ -781,6 +838,37 @@ function toggleSiteType(type) {
   if (next.has(type)) next.delete(type)
   else next.add(type)
   enabledSiteTypes = next
+  draw()
+}
+
+/** @param {number} num */
+function setFuelRateNum(num) {
+  fuelRateNum = Math.max(0, Math.round(num))
+  recomputeHighlightedPath()
+  draw()
+}
+/** @param {number} den */
+function setFuelRateDen(den) {
+  fuelRateDen = Math.max(1, Math.round(den))
+  recomputeHighlightedPath()
+  draw()
+}
+/** @param {number} cap */
+function setFuelCapacity(cap) {
+  fuelCapacity = Math.max(0, Math.round(cap))
+  recomputeHighlightedPath()
+  draw()
+}
+/** @param {boolean} value */
+function setFreePivot(value) {
+  freePivot = value
+  recomputeHighlightedPath()
+  draw()
+}
+/** @param {MetricKey} key @param {number|null} value */
+function setConstraint(key, value) {
+  constraints = {...constraints, [key]: value}
+  recomputeHighlightedPath()
   draw()
 }
 
@@ -1137,7 +1225,7 @@ function draw() {
     ctx.restore()
   }
   const weight = pathWeight(highlightedPath)
-  ReactDOM.render(React.createElement(Overlay, {mapData, path: highlightedPath, weight, metricPriority, prioritizeMetric, cancelPath: () => { cancelPathSelection(); draw() }, isru, setIsru, thrust, setThrust, enabledSiteTypes, toggleSiteType, solarSeason, setSolarSeason}), overlay)
+  ReactDOM.render(React.createElement(Overlay, {mapData, path: highlightedPath, weight, metricPriority, prioritizeMetric, cancelPath: () => { cancelPathSelection(); draw() }, isru, setIsru, thrust, setThrust, enabledSiteTypes, toggleSiteType, solarSeason, setSolarSeason, fuelRateNum, setFuelRateNum, fuelRateDen, setFuelRateDen, fuelCapacity, setFuelCapacity, freePivot, setFreePivot, constraints, setConstraint}), overlay)
 }
 
 /** @param {number} burns */

@@ -43,7 +43,7 @@ type MapDataJSON = {
   edgeLabels: Record<string, Record<string, string>>
 }
 
-type PathNode = {node: string, dir: string|null, bonus: number, done?: true, wait?: true, burnsRemaining: number}
+type PathNode = {node: string, dir: string|null, bonus: number, done?: true, wait?: true, burnsRemaining: number, fuelRemaining?: number, engineBurnsThisTurn?: number, pivotUsed?: boolean}
 type PathData = {distance: Record<string, number[]>, previous: Record<string, PathNode>}
 
 type Vec2 = {x: number, y: number}

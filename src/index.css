@@ -55,6 +55,26 @@ canvas { display: block; }
   font-size: 14px;
   cursor: pointer;
 }
+.PathInfo-constraintInput {
+  width: 36px;
+  padding: 2px 4px;
+  background: #0a0a0a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: white;
+  font-size: 14px;
+  text-align: center;
+}
+.PathInfo-constraintInput::-webkit-inner-spin-button,
+.PathInfo-constraintInput::-webkit-outer-spin-button {
+  filter: invert(1);
+}
+.PathInfo-constraintInput::placeholder {
+  color: #666;
+}
+.PathInfo-label--over {
+  color: #ff6b6b;
+}
 .PathInfo-destinationRow {
   align-self: flex-start;
   justify-self: flex-start;
@@ -268,6 +288,45 @@ canvas { display: block; }
 .VehicleInfo input[type="number"]::-webkit-inner-spin-button,
 .VehicleInfo input[type="number"]::-webkit-outer-spin-button {
   filter: invert(1);
+}
+.VehicleInfo .fuel-rate-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.VehicleInfo .fuel-rate-field {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  padding: 6px 4px;
+  background: #0a0a0a;
+  border: 2px solid white;
+  border-radius: 6px;
+  color: white;
+  font-size: 16px;
+  text-align: center;
+}
+.VehicleInfo .fuel-rate-field::-webkit-inner-spin-button,
+.VehicleInfo .fuel-rate-field::-webkit-outer-spin-button {
+  filter: invert(1);
+}
+.VehicleInfo .fuel-rate-separator {
+  font-size: 20px;
+  font-weight: bold;
+  color: #aaa;
+}
+.VehicleInfo .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: bold;
+  letter-spacing: 0.02em;
+}
+.VehicleInfo .checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: white;
 }
 
 .VehicleInfo input[type="range"]::-webkit-slider-thumb {
